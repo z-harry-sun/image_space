@@ -1,13 +1,88 @@
 # import the necessary packages
 from optparse import OptionParser
-from scipy.spatial import distance as dist
 import matplotlib.pyplot as plt
 import numpy as np
-import argparse
-import glob
 import cv2
-import sys
 import pickle
+import sys
+import hashlib
+import masir
+
+###########################
+def image_match_csift( all_files, options ):
+
+    # features are computed from SMQTK (https://github.com/Kitware/SMQTK.git)
+    map_ingest_fname = {}
+    image_files = []
+
+    ingest = masir.IngestManager( options.dpath )
+    ingest_files = dict( ingest.items() )
+
+    # flag to avoid duplicates
+    found_flags = np.zeros( len(ingest_files), dtype=np.int )
+
+    # loop over all images
+    for (i, fname) in enumerate(all_files):
+        if options.ipath:
+            path_fname = options.ipath + '/' + fname
+        else:
+            path_fname = fname
+
+        # read in image
+        image = cv2.imread( path_fname );
+
+        if image is None:
+            print path_fname + " : fail to read"
+            continue
+
+        md5 = hashlib.md5(open(path_fname, 'rb').read()).hexdigest()
+
+        for j in range( len(ingest_files) ):
+            if (found_flags[j] == 0) & (ingest_files[j].find(md5) > 0):
+                map_ingest_fname[ ingest_files[j] ] = fname
+                found_flags[j] = 1
+                break
+        if j > len(ingest_files)-1:
+            print "Cannot find matching file " + fname
+            sys.exit()
+
+    # file list
+    for j in range( len(ingest_files) ):
+        print j, ingest_files[j], map_ingest_fname[ ingest_files[j] ]
+        image_files.append( map_ingest_fname[ ingest_files[j] ] )
+    pickle.dump( image_files, open( options.opath + "/csift_files.p","wb") )
+
+    # feature matrix
+    feature_matrix = np.load( open( options.dpath + "features/colordescriptor-csift/feature_data.npy" ) )
+    pickle.dump( feature_matrix, open( options.opath+"/csift_feature.p","wb") )
+
+    # affinity matrix
+    dists = np.load( open( options.dpath + "features/colordescriptor-csift/kernel_data.npy") )
+    pickle.dump( dists, open( options.opath+"/csift_affinity.p","wb") )
+
+    # K nearest neighbors
+    knn = {}
+    k=int(options.top)
+    for (i, fi) in enumerate(image_files):
+        vec = sorted( zip(dists[i,:], image_files), reverse = True )
+        knn[fi] = vec[:k]
+        print knn[fi]
+    pickle.dump( knn, open( options.opath+"/csift_knn.p","wb") )
+
+    # Kmeans clustering
+    term_crit = (cv2.TERM_CRITERIA_EPS, 100, 0.01)
+    print feature_matrix
+
+    ret, labels, centers = cv2.kmeans(np.float32(feature_matrix), int(options.cluster_count), term_crit, 10, cv2.KMEANS_RANDOM_CENTERS )
+
+    label_list=[]
+    for (i,l) in enumerate(labels):
+        label_list.append(l[0])
+    print label_list
+
+    image_label = zip( image_files, label_list )
+    print image_label
+    pickle.dump( image_label, open( options.opath+"/csift_clustering.p","wb") )
 
 ###########################
 def image_match_histogram( all_files, options ):
@@ -40,13 +115,11 @@ def image_match_histogram( all_files, options ):
         hist = v / sum(v)
         histograms[fname] = hist
 
-    pickle.dump( histograms, open( options.opath+"/color_feature.p","wb") )
-
     # feature matrix
     feature_matrix = np.zeros( (len(histograms), len(hist)) )
     for (i,fi) in enumerate(image_files):
         feature_matrix[i,:] = histograms[image_files[i]]
-    pickle.dump( feature_matrix, open( options.opath+"/color_matrix.p","wb") )
+    pickle.dump( feature_matrix, open( options.opath+"/color_featue.p","wb") )
 
     dists = np.zeros((len(image_files), len(image_files)))
     knn = {}
@@ -62,7 +135,6 @@ def image_match_histogram( all_files, options ):
 
     # K nearest neighbors
     k=int(options.top)
-    print 'knn'
     for (i, fi) in enumerate(image_files):
         vec = sorted( zip(dists[i,:], image_files), reverse = True )
         knn[fi] = vec[:k]
@@ -98,6 +170,10 @@ def main():
                       action="store", dest="opath",
                       help="output path")
 
+    parser.add_option("-a", "--data_path", default="",
+                      action="store", dest="dpath",
+                      help="csift data path")
+
     parser.add_option("-f", "--feature", default="color_histogram",
                       action="store", dest="feature",
                       help="color_histogram; sift_match;dist_info")
@@ -122,12 +198,14 @@ def main():
 
     if len(args) < 1 :
         print "Need one argument: image_list_file \n"
-        sys.exit(1)
+        sys.exit()
 
     image_files = [line.strip() for line in open(args[0])]
 
     if options.feature == "color_histogram":
         image_match_histogram( image_files, options )
+    elif options.feature == "csift":
+        image_match_csift( image_files, options )
 
 if __name__=="__main__":
     main()
